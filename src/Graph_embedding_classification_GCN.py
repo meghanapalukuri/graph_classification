@@ -2,7 +2,7 @@ from pickle import load as pickle_load
 from loguru import logger
 from random import sample
 from sklearn.metrics import f1_score,average_precision_score
-from models import SimpleGCNClassifier
+from models import OneConvTwoClassiLayerGCN, TwoConvFourClassiLayerGCN, TwoConvThreeClassiLayerGCN, TwoConvSAGE, OneConvSAGE
 from pickle import dump as pkl_dump, load as pkl_load
 import torch
 import networkx
@@ -99,7 +99,7 @@ def get_train_val_test_sets(train_complex_graph_list, neg_train_complex_graph_li
     
     
     random.shuffle(train_val_set)
-    random.shuffle(test_set)
+    #random.shuffle(test_set)
     
     
     split_pt = int(0.8*len(train_val_set))
@@ -109,7 +109,7 @@ def get_train_val_test_sets(train_complex_graph_list, neg_train_complex_graph_li
     return train_set, val_set, test_set
 
 
-def model_training(model,embed, opt, embedding_size, trainloader,valloader, val_set, prev_epochs = 0,n_epochs_to_train = 10):
+def model_training(model,embed, opt, embedding_size, trainloader,valloader, val_set, prev_epochs = 0,n_epochs_to_train = 10, loss_class_weights = [0.5,0.5]):
 
     for epoch in range(n_epochs_to_train):
         
@@ -121,9 +121,10 @@ def model_training(model,embed, opt, embedding_size, trainloader,valloader, val_
         for batched_graph, labels in trainloader:
             #features = batched_graph.ndata['attr']
             features = torch.tensor([[0 for i in range(embedding_size)] for j in range(batched_graph.number_of_nodes())])
-            embedded_features = embed(features.argmax(-1))
-            logits = model.forward(batched_graph, embedded_features) # Pass the features through the network to get logits
-            loss = F.cross_entropy(logits, labels)  # Compute cross entropy loss. 
+            if embed:
+                features = embed(features.argmax(-1))
+            logits = model.forward(batched_graph, features) # Pass the features through the network to get logits
+            loss = F.cross_entropy(logits, labels, weight = torch.tensor(loss_class_weights))  # Compute cross entropy loss. 
                                                     # HINT : Use the loss functions defined within torch.nn.functional
             
             opt.zero_grad()         # Reset gradients for the next batch, since they accumulate by default
@@ -136,12 +137,14 @@ def model_training(model,embed, opt, embedding_size, trainloader,valloader, val_
     
             correct = 0
             model.eval()
-    
+            test_predictions = []
+            test_gt_lbls = []    
             for batched_graph, labels in valloader:
                 #features = batched_graph.ndata['attr'] 
                 features = torch.tensor([[0 for i in range(embedding_size)] for j in range(batched_graph.number_of_nodes())])            
-                embedded_features = embed(features.argmax(-1))
-                logits = model.forward(batched_graph, embedded_features)    # This is the same as the training loop
+                if embed:
+                    features = embed(features.argmax(-1))
+                logits = model.forward(batched_graph, features)    # This is the same as the training loop
     
                 # Logits is a tensor comprising other tensors of 2 elements each. These 2 elements are indicative of (not
                 # but not exactly equal to) the probability of the label 0 / 1 for the graph at that index.
@@ -153,6 +156,8 @@ def model_training(model,embed, opt, embedding_size, trainloader,valloader, val_
                                     # and the model is not simply predicting one label for every example.
     
                 correct += (predicted == labels.data).sum().item()
+                test_predictions = test_predictions + list(predicted.data)
+                test_gt_lbls = test_gt_lbls + list(labels.data)
     
             acc = 100*correct / len(val_set)
     
@@ -160,7 +165,11 @@ def model_training(model,embed, opt, embedding_size, trainloader,valloader, val_
         # Ideally you should see the cumulative loss decrease with each epoch
         train_loss = cumulative_loss_train / len(trainloader)
         tot_epochs = prev_epochs+epoch
-        logger.info("Epoch: {} Train loss: {} Validation Accuracy: {}".format(tot_epochs, train_loss ,acc))
+        f1 = f1_score(test_gt_lbls, test_predictions)
+        
+        #logger.info("Epoch: {} Train loss: {} Validation Accuracy: {}".format(tot_epochs, train_loss ,acc))
+        logger.info("Epoch: {} Train loss: {} Validation F1: {}".format(tot_epochs, train_loss ,f1))
+        
         
     res_dict = {"Epochs": tot_epochs, "Training loss": train_loss, "Validation accuracy": acc}
     return model, res_dict, embed, opt
@@ -180,8 +189,9 @@ def model_testing(model, testloader, embed):
         for batched_graph, labels in testloader:
             #features = batched_graph.ndata['attr'] 
             features = torch.tensor([[0 for i in range(7)] for j in range(batched_graph.number_of_nodes())])            
-            embedded_features = embed(features.argmax(-1))
-            logits = model.forward(batched_graph, embedded_features)    # This is the same as the training loop
+            if embed:
+                features = embed(features.argmax(-1))
+            logits = model.forward(batched_graph, features)    # This is the same as the training loop
     
             # Logits is a tensor comprising other tensors of 2 elements each. These 2 elements are indicative of (not
             # but not exactly equal to) the probability of the label 0 / 1 for the graph at that index.
@@ -233,16 +243,64 @@ def write_results(res_dict, out_dir, model, embed, opt, results_df=pd.DataFrame(
     with open(results_path + out_dir + '/optimizer.pkl','wb') as f:
         pkl_dump(opt, f)        
     
-
-def main():
-    results_path = '../results/'
-    out_dir = 'GCN_downsampled_negatives'
-    data_folder_path = '../data/'
-    downsample_negatives_flag = 1
     
-    # out_dir = 'GCN'
+def train_and_evaluate_model(results_path,out_dir,embedding_layer_flag,model,
+                                 trainloader,valloader,testloader,n_epochs_to_train,
+                                 loss_class_weights,embedding_size,input_layer_size,val_set):
+    # ### 5. Training
+    try:
+        with open(results_path + out_dir + '/model.pkl','rb') as f:
+            model = pkl_load(f)
+        if embedding_layer_flag:
+            with open(results_path + out_dir + '/embedding.pkl','rb') as f:            
+                embed = pkl_load(f)
+        else:
+            embed = None
+        with open(results_path + out_dir + '/optimizer.pkl','rb') as f:
+            opt = pkl_load(f)
+            
+        results_df = pd.read_csv(results_path + out_dir + '/results.csv', index_col = 0)
+        prev_epochs = results_df['Epochs'][-1]
+        
+    except: # train new model
+        if embedding_layer_flag:
+            embed = nn.Embedding(embedding_size, input_layer_size)    
+            opt = torch.optim.Adam(itertools.chain(model.parameters(), embed.parameters()))
+        else:
+            embed = None
+            opt = torch.optim.Adam(model.parameters())
+        results_df = pd.DataFrame()
+        prev_epochs = 0
+    
+    model, res_dict, embed, opt = model_training(model,embed, opt, embedding_size, trainloader,valloader, val_set, prev_epochs,n_epochs_to_train,loss_class_weights)
+    correct, test_predictions, test_gt_lbls = model_testing(model, testloader, embed)
+    res_dict = evaluate(test_predictions, test_gt_lbls, correct, res_dict)
+    
+    write_results(res_dict, out_dir, model, embed, opt, results_df,results_path)
+    
+    
+def main():
+    
+    ###################### CONFIG #########################
+    results_path = '../results/'
+    data_folder_path = '../data/'    
+    
+    #out_dir = 'GCN_downsampled_negatives'
+    downsample_negatives_flag = 1
+    loss_class_weights = [0.5,0.5]
+    
+    # out_dir = 'GCN_0.1neg_wt'
     # downsample_negatives_flag = 0
-    n_epochs_to_train = 10
+    # #loss_class_weights = [0.33,0.67]
+    # loss_class_weights = [0.1,0.9]    
+    
+    # Model options
+    n_epochs_to_train = 10000
+    
+    
+    batch_size = 32
+    
+    #################################
     
         # Check for GPU
     if torch.cuda.is_available():
@@ -266,37 +324,39 @@ def main():
     
     
     # Get batched data sets
-    batch_size = 32
     
     trainloader = get_data_loader(train_set,batch_size)
     valloader = get_data_loader(val_set,batch_size)
     testloader = get_data_loader(test_set,batch_size)
     
-    # ### 5. Training
-    embedding_size = 7 # Embedding of size 7 chosen randomly
-    try:
-        with open(results_path + out_dir + '/model.pkl','rb') as f:
-            model = pkl_load(f)
-        with open(results_path + out_dir + '/embedding.pkl','rb') as f:            
-            embed = pkl_load(f)
-        with open(results_path + out_dir + '/optimizer.pkl','rb') as f:
-            opt = pkl_load(f)
-            
-        results_df = pd.read_csv(results_path + out_dir + '/results.csv', index_col = 0)
-        prev_epochs = results_df['Epochs'][-1]
+    embedding_size = 7 # 7 chosen randomly, also the size of features
+    out_layer_size = 2 # Equal to the number of classes
+    
+    embedding_options = [0,1]
+
+    for embedding_layer_flag in embedding_options:
+        if embedding_layer_flag:
+            input_layer_size = 5
+        else:
+            input_layer_size = embedding_size
         
-    except: # train new model
-        model = SimpleGCNClassifier(5, 25, 2) 
-        embed = nn.Embedding(embedding_size, 5)    
-        opt = torch.optim.Adam(itertools.chain(model.parameters(), embed.parameters()))
-        results_df = pd.DataFrame()
-        prev_epochs = 0
-    
-    model, res_dict, embed, opt = model_training(model,embed, opt, embedding_size, trainloader,valloader, val_set, prev_epochs,n_epochs_to_train)
-    correct, test_predictions, test_gt_lbls = model_testing(model, testloader, embed)
-    res_dict = evaluate(test_predictions, test_gt_lbls, correct, res_dict)
-    
-    write_results(res_dict, out_dir, model, embed, opt, results_df,results_path)
+        models = [OneConvTwoClassiLayerGCN(input_layer_size, 25, out_layer_size), 
+                  TwoConvThreeClassiLayerGCN(input_layer_size, 25, 27, out_layer_size),
+                  TwoConvThreeClassiLayerGCN(input_layer_size, 25, 30, out_layer_size),
+                  TwoConvFourClassiLayerGCN(input_layer_size, 25, 12, out_layer_size),
+                  OneConvSAGE(input_layer_size, out_layer_size),
+                  TwoConvSAGE(input_layer_size, 25, out_layer_size)
+                  ]
+        
+        for model in models:
+            out_dir = str(model)[:12]
+            try:
+
+                train_and_evaluate_model(results_path,out_dir,embedding_layer_flag,model,
+                                     trainloader,valloader,testloader,n_epochs_to_train,
+                                     loss_class_weights,embedding_size,input_layer_size,val_set)
+            except Exception as e:
+                logger.error(str(e))
     
     
 if __name__ == '__main__':
