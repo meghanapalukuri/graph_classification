@@ -349,7 +349,7 @@ def main():
                   ]
         
         for model in models:
-            out_dir = str(model)[:12]
+            out_dir = 'emb' +str(embedding_layer_flag) + str(model)[:12]
             try:
 
                 train_and_evaluate_model(results_path,out_dir,embedding_layer_flag,model,

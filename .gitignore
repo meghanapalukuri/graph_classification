@@ -3,3 +3,4 @@ jupyter_notebooks/
 humap_*
 results*
 data*
+src/__pycache__/
