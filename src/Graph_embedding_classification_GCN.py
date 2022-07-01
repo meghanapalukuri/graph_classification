@@ -69,7 +69,7 @@ def downsample_negatives(neg_train_comp_list_orig, neg_test_comp_list_orig, trai
         
         logger.info("Length of final testing complexes = {}",len(neg_train_comp_list) + len(neg_test_comp_list))
         
-        with open(data_folder_path + "processed/ownsampled_negative_train.pkl",'wb') as f:            
+        with open(data_folder_path + "processed/downsampled_negative_train.pkl",'wb') as f:            
             pkl_dump(neg_train_comp_list, f)
             
         with open(data_folder_path + "processed/downsampled_negative_test.pkl",'wb') as f:
@@ -97,7 +97,6 @@ def get_train_val_test_sets(train_complex_graph_list, neg_train_complex_graph_li
     train_val_set = train_complex_graph_list + neg_train_complex_graph_list
     test_set = test_complex_graph_list + neg_test_complex_graph_list
     
-    
     random.shuffle(train_val_set)
     #random.shuffle(test_set)
     
@@ -110,7 +109,7 @@ def get_train_val_test_sets(train_complex_graph_list, neg_train_complex_graph_li
 
 
 def model_training(model,embed, opt, embedding_size, trainloader,valloader, val_set, prev_epochs = 0,n_epochs_to_train = 10, loss_class_weights = [0.5,0.5]):
-
+    
     for epoch in range(n_epochs_to_train):
         
         model.train()               # Set the model to train mode to allow gradients to be calculated
@@ -156,8 +155,8 @@ def model_training(model,embed, opt, embedding_size, trainloader,valloader, val_
                                     # and the model is not simply predicting one label for every example.
     
                 correct += (predicted == labels.data).sum().item()
-                test_predictions = test_predictions + list(predicted.data)
-                test_gt_lbls = test_gt_lbls + list(labels.data)
+                #test_predictions = test_predictions + list(predicted.data)
+                #test_gt_lbls = test_gt_lbls + list(labels.data)
     
             acc = 100*correct / len(val_set)
     
@@ -165,10 +164,10 @@ def model_training(model,embed, opt, embedding_size, trainloader,valloader, val_
         # Ideally you should see the cumulative loss decrease with each epoch
         train_loss = cumulative_loss_train / len(trainloader)
         tot_epochs = prev_epochs+epoch
-        f1 = f1_score(test_gt_lbls, test_predictions)
+        #f1 = f1_score(test_gt_lbls, test_predictions)
         
         #logger.info("Epoch: {} Train loss: {} Validation Accuracy: {}".format(tot_epochs, train_loss ,acc))
-        logger.info("Epoch: {} Train loss: {} Validation F1: {}".format(tot_epochs, train_loss ,f1))
+        #logger.info("Epoch: {} Train loss: {} Validation F1: {}".format(tot_epochs, train_loss ,f1))
         
         
     res_dict = {"Epochs": tot_epochs, "Training loss": train_loss, "Validation accuracy": acc}
@@ -243,12 +242,7 @@ def write_results(res_dict, out_dir, model, embed, opt, results_df=pd.DataFrame(
     with open(results_path + out_dir + '/optimizer.pkl','wb') as f:
         pkl_dump(opt, f)        
     
-    
-def train_and_evaluate_model(results_path,out_dir,embedding_layer_flag,model,
-                                 trainloader,valloader,testloader,n_epochs_to_train,
-                                 loss_class_weights,embedding_size,input_layer_size,val_set):
-    # ### 5. Training
-    try:
+def load_model(results_path,out_dir,embedding_layer_flag):
         with open(results_path + out_dir + '/model.pkl','rb') as f:
             model = pkl_load(f)
         if embedding_layer_flag:
@@ -260,6 +254,15 @@ def train_and_evaluate_model(results_path,out_dir,embedding_layer_flag,model,
             opt = pkl_load(f)
             
         results_df = pd.read_csv(results_path + out_dir + '/results.csv', index_col = 0)
+        return model, embed, opt, results_df
+    
+    
+def train_and_evaluate_model(results_path,out_dir,embedding_layer_flag,model,
+                                 trainloader,valloader,testloader,n_epochs_to_train,
+                                 loss_class_weights,embedding_size,input_layer_size,val_set):
+    # ### 5. Training
+    try:
+        model, embed, opt, results_df = load_model(results_path,out_dir,embedding_layer_flag)
         prev_epochs = results_df['Epochs'][-1]
         
     except: # train new model
@@ -350,6 +353,7 @@ def main():
         
         for model in models:
             out_dir = 'emb' +str(embedding_layer_flag) + str(model)[:12]
+            logger.info(out_dir)
             try:
 
                 train_and_evaluate_model(results_path,out_dir,embedding_layer_flag,model,
